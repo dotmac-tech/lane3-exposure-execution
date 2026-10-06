@@ -25,7 +25,7 @@ jobs:
     # B5 probe N4: main guard removed on this never-merged branch so the job requests the group.
     runs-on:
       group: lane3-exposure-protected
-    environment: lane3-rehearsal-protected
+    # B5 probe N4b: Environment removed too, so only the runner-group workflow restriction can refuse.
     permissions:
       contents: read
     timeout-minutes: 5
