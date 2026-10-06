@@ -22,7 +22,7 @@ permissions: {}
 
 jobs:
   rehearse:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    # B5 probe N4: main guard removed on this never-merged branch so the job requests the group.
     runs-on:
       group: lane3-exposure-protected
     environment: lane3-rehearsal-protected

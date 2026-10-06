@@ -1,0 +1,12 @@
+# B5 negative probe N1/N2 (never merged): a pull_request job asking for the Lane 3 group.
+name: b5 probe pull_request
+on: pull_request
+permissions: {}
+jobs:
+  probe:
+    runs-on:
+      group: lane3-exposure-protected
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - run: echo "B5 NEGATIVE PROBE WAS ASSIGNED A RUNNER - this must never happen" && exit 1

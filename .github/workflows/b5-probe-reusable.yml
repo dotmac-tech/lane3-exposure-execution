@@ -1,0 +1,12 @@
+# B5 negative probe N6 (never merged): a reusable workflow whose job asks for the Lane 3 group.
+name: b5 probe reusable
+on: workflow_call
+permissions: {}
+jobs:
+  probe:
+    runs-on:
+      group: lane3-exposure-protected
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - run: echo "B5 NEGATIVE PROBE WAS ASSIGNED A RUNNER - this must never happen" && exit 1

@@ -1,0 +1,9 @@
+# B5 negative probe N6 (never merged): a caller of the reusable probe.
+name: b5 probe reusable caller
+on:
+  push:
+    branches: [b5-probe-20261006]
+permissions: {}
+jobs:
+  call:
+    uses: ./.github/workflows/b5-probe-reusable.yml
