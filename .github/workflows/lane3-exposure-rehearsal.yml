@@ -1,0 +1,59 @@
+name: Lane 3 exposure rehearsal (refuses)
+
+run-name: lane3 starter=${{ inputs.starter_revision }} candidate=${{ inputs.candidate_version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      starter_revision:
+        description: Starter protected-main revision, 40 lowercase hex characters
+        required: true
+        type: string
+      candidate_version:
+        description: Candidate version, for example 0.4.0a2
+        required: true
+        type: string
+      grant_ref:
+        description: Opaque Gate-3 grant reference
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  rehearse:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on:
+      group: lane3-exposure-protected
+    environment: lane3-rehearsal-protected
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: Validate the dispatch grammar before anything else
+        shell: python3 -I {0}
+        env:
+          STARTER_REVISION: ${{ inputs.starter_revision }}
+          CANDIDATE_VERSION: ${{ inputs.candidate_version }}
+        run: |
+          import os
+          import re
+          import sys
+
+          GRAMMAR = r"lane3 starter=(?P<starter>[0-9a-f]{40}) candidate=(?P<candidate>[0-9]+(?:\.[0-9]+){2}(?:(?:a|b|rc)[0-9]+)?)"
+
+          title = (
+              "lane3 starter="
+              + os.environ.get("STARTER_REVISION", "")
+              + " candidate="
+              + os.environ.get("CANDIDATE_VERSION", "")
+          )
+          if re.fullmatch(GRAMMAR, title) is None:
+              print("::error::dispatch inputs do not match the Lane 3 grammar; refusing")
+              sys.exit(1)
+          print("dispatch grammar accepted: " + title)
+      - name: Refuse until Lane 3 execution is admitted
+        shell: bash
+        run: |
+          echo "refusal-only launcher: no Gate-3 grant verification, private delivery or Lane 3 execution exists yet" >&2
+          exit 1
