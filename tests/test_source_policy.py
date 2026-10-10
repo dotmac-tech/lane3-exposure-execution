@@ -578,5 +578,32 @@ class BrokerDiscoveryBehavior(unittest.TestCase):
         status, _ = self.execute_discovery(None)
         self.assertEqual(status, 1)
 
+
+class ReadFailureDisclosure(unittest.TestCase):
+    def project(self, error):
+        tree = ast.parse(policy.PROOF_STEP_SCRIPT)
+        handler = next(node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)
+                       and any(isinstance(n, ast.Constant) and n.value == "unclassified" for n in ast.walk(node)))
+        module = ast.Module(body=handler.body, type_ignores=[])
+        out = []
+        exec(compile(ast.fix_missing_locations(module), "failure-projection", "exec"),
+             {"exc": error, "refuse": out.append})
+        return out
+
+    def test_known_categories_survive(self):
+        error_type = type("TopologySourceUnavailable", (RuntimeError,), {})
+        for label in ("transport.wireguard", "oidc.request", "transport.request"):
+            self.assertEqual(self.project(error_type(label)), ["read." + label])
+
+    def test_unknown_payloads_are_never_disclosed(self):
+        error_type = type("TopologySourceUnavailable", (RuntimeError,), {})
+        for payload in ("private-value-example", "Bearer example", {"credential": "example"}, None):
+            self.assertEqual(self.project(error_type(payload)), ["read.unclassified"])
+
+    def test_foreign_exception_and_multiple_arguments_are_hidden(self):
+        error_type = type("TopologySourceUnavailable", (RuntimeError,), {})
+        self.assertEqual(self.project(ValueError("oidc.request")), ["read.unclassified"])
+        self.assertEqual(self.project(error_type("oidc.request", "private-example")), ["read.unclassified"])
+
 if __name__ == "__main__":
     unittest.main()

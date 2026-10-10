@@ -178,7 +178,18 @@ jobs:
               reading = source.read()
               topology = topology_module.parse_topology_record(reading.record)
           except Exception as exc:
-              refuse("read." + type(exc).__name__)
+              # Fixed source-defined categories only; never print exception values.
+              category = "unclassified"
+              allowed = {
+                  "transport.wireguard", "oidc.request", "transport.request",
+                  "expected_version", "source.consumed", "source.deadline",
+              }
+              if type(exc).__name__ == "TopologySourceUnavailable" and len(exc.args) == 1:
+                  for label in allowed:
+                      if exc.args[0] == label:
+                          category = label
+                          break
+              refuse("read." + category)
           if reading.kv_version != EXPECTED_VERSION:
               refuse("version")
           print(json.dumps({
