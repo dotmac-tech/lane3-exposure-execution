@@ -108,10 +108,12 @@ jobs:
                       or origin.query
                       or origin.fragment
                       or origin.username is not None
-                      or request.scheme != origin.scheme
-                      or request.netloc != origin.netloc
                   ):
-                      return "oidc.validation.origin"
+                      return "oidc.validation.configured_origin"
+                  if request.scheme != origin.scheme:
+                      return "oidc.validation.scheme"
+                  if request.netloc != origin.netloc:
+                      return "oidc.validation.netloc"
                   if (
                       not request.path.startswith("/")
                       or not request.path.endswith("/idtoken")

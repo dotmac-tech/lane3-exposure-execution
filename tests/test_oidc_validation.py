@@ -40,17 +40,28 @@ class OidcValidationTest(unittest.TestCase):
         self.assertIsNone(self.category(token="x" * 65536))
         self.assertIsNone(self.category(url=self.ORIGIN + "/idtoken?api-version=v%202"))
 
-    def test_origin_exact_match_and_approved_shape(self):
-        for origin in ("https://rotated.actions.githubusercontent.com",
-                       self.ORIGIN + "/", self.ORIGIN + "?private=marker",
+    def test_configured_origin_approved_shape(self):
+        for origin in (self.ORIGIN + "/", self.ORIGIN + "?private=marker",
                        self.ORIGIN + "#marker", self.ORIGIN + ":443",
                        "http://synthetic.actions.githubusercontent.com",
                        "https://user@synthetic.actions.githubusercontent.com",
                        "https://synthetic.example"):
             with self.subTest(origin=origin):
-                self.assertEqual(self.category(origin=origin), "oidc.validation.origin")
+                self.assertEqual(self.category(origin=origin), "oidc.validation.configured_origin")
+
+    def test_valid_origin_with_bad_request_scheme(self):
         self.assertEqual(self.category(url=self.URL.replace("https:", "http:")),
-                         "oidc.validation.origin")
+                         "oidc.validation.scheme")
+
+    def test_request_netloc_exact_match(self):
+        self.assertEqual(self.category(origin="https://rotated.actions.githubusercontent.com"),
+                         "oidc.validation.netloc")
+        for netloc in ("rotated.actions.githubusercontent.com",
+                       "synthetic.actions.githubusercontent.com:443",
+                       "private-user-marker@synthetic.actions.githubusercontent.com"):
+            with self.subTest(netloc=netloc):
+                self.assertEqual(self.category(url="https://" + netloc + "/idtoken?api-version=2.0"),
+                                 "oidc.validation.netloc")
 
     def test_path_fragment_and_whitespace(self):
         for url in (self.ORIGIN + "/wrong?api-version=2.0", self.URL + "#marker",
@@ -85,7 +96,11 @@ class OidcValidationTest(unittest.TestCase):
 
     def test_validation_order(self):
         self.assertEqual(self.category(url=self.URL + "#marker", token="", origin=self.ORIGIN + "/"),
-                         "oidc.validation.origin")
+                         "oidc.validation.configured_origin")
+        self.assertEqual(self.category(url="http://rotated.actions.githubusercontent.com/wrong", token=""),
+                         "oidc.validation.scheme")
+        self.assertEqual(self.category(url="https://rotated.actions.githubusercontent.com/wrong", token=""),
+                         "oidc.validation.netloc")
         self.assertEqual(self.category(url=self.URL + "#marker", token=""), "oidc.validation.path")
         self.assertEqual(self.category(url=self.URL + "&audience=marker", token=""),
                          "oidc.validation.query")
@@ -129,6 +144,19 @@ class OidcValidationTest(unittest.TestCase):
         self.assertEqual(output, "::error::Lane 3 OIDC-to-KV read proof refused at oidc.validation.query\n")
         construct.assert_not_called()
         read.assert_not_called()
+
+    def test_origin_mismatch_diagnostics_do_not_reflect_request_values(self):
+        for url, category in (
+            (self.URL.replace("https:", "http:"), "scheme"),
+            ("https://rotated.actions.githubusercontent.com/private/idtoken?api-version=private-query-marker", "netloc"),
+            ("https://synthetic.actions.githubusercontent.com:443/private/idtoken?api-version=private-query-marker", "netloc"),
+            ("https://private-user-marker@synthetic.actions.githubusercontent.com/private/idtoken?api-version=private-query-marker", "netloc"),
+        ):
+            with self.subTest(category=category):
+                output, construct, read = self.execute_source_step(url)
+                self.assertEqual(output, "::error::Lane 3 OIDC-to-KV read proof refused at oidc.validation." + category + "\n")
+                construct.assert_not_called()
+                read.assert_not_called()
 
     def test_valid_preflight_retains_fixed_read_failure(self):
         output, construct, read = self.execute_source_step(self.URL)
