@@ -141,6 +141,48 @@ jobs:
                   return "oidc.validation.shape"
 
 
+          def oidc_origin_mismatch_metadata(request_url, approved_origin):
+              # Observe only a bounded public hostname; never return raw URL components.
+              import re
+              from urllib.parse import urlsplit
+              unavailable = {
+                  "observed_origin": None,
+                  "hostname_matches_configured": False,
+                  "explicit_port_present": False,
+                  "port_is_443": False,
+                  "userinfo_present": False,
+              }
+              if not isinstance(request_url, str) or not isinstance(approved_origin, str):
+                  return unavailable
+              try:
+                  if any(c.isspace() for c in request_url + approved_origin):
+                      return unavailable
+                  request = urlsplit(request_url)
+                  configured = urlsplit(approved_origin)
+                  for parsed in (request, configured):
+                      hostname = parsed.hostname
+                      if (parsed.scheme != "https" or not hostname
+                              or len(hostname) > 253
+                              or not hostname.endswith(".actions.githubusercontent.com")
+                              or any(len(label) > 63 or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) is None
+                                     for label in hostname.split("."))):
+                          return unavailable
+                      # Accessing port rejects malformed and out-of-range ports.
+                      port = parsed.port
+                      if parsed.netloc.rsplit("@", 1)[-1].endswith(":"):
+                          return unavailable
+                  port = request.port
+                  return {
+                      "observed_origin": "https://" + request.hostname,
+                      "hostname_matches_configured": request.hostname == configured.hostname,
+                      "explicit_port_present": port is not None,
+                      "port_is_443": port == 443,
+                      "userinfo_present": request.username is not None or request.password is not None,
+                  }
+              except Exception:
+                  return unavailable
+
+
           def read_config(path):
               # Walk from / using pinned directory descriptors; never follow symlinks.
               directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -222,6 +264,17 @@ jobs:
                   oidc_module.MAX_RESPONSE,
               )
               if validation is not None:
+                  if validation == "oidc.validation.netloc":
+                      metadata = oidc_origin_mismatch_metadata(
+                          os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""),
+                          config["oidc_broker_origin"],
+                      )
+                      print(json.dumps({
+                          "lane3_oidc_origin_mismatch": (
+                              "OBSERVED" if metadata["observed_origin"] is not None else "UNAVAILABLE"
+                          ),
+                          **metadata,
+                      }, sort_keys=True))
                   refuse(validation)
               source = source_module.wireguard_github_openbao_source(
                   expected_version=EXPECTED_VERSION,
