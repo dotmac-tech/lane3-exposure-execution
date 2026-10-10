@@ -320,12 +320,12 @@ class GrammarTest(PlantCase):
 
 
 class RefusalOnlyTest(PlantCase):
-    def test_discovery_cannot_request_a_token(self):
-        self.replace(PRIV, '    sys.exit(0)  # The next step still performs the final refusal.', '    pass')
+    def test_handoff_cannot_be_removed(self):
+        self.replace(PRIV, 'pinned = client.obtain_from_launch(request_url=request_url, expectation=expectation)', 'pinned = None')
         self.assertRefused("REFUSAL_ONLY")
 
-    def test_discovery_cannot_print_full_request_url(self):
-        self.replace(PRIV, '"oidc_broker_origin": "https://" + request.hostname,', '"oidc_broker_origin": os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],')
+    def test_handoff_cannot_print_request_url(self):
+        self.replace(PRIV, 'refuse("handoff")', 'print(request_url)')
         self.assertRefused("REFUSAL_ONLY")
 
     def test_proof_config_no_follow_removed(self):
@@ -355,7 +355,7 @@ class RefusalOnlyTest(PlantCase):
         self.assertRefused("REFUSAL_ONLY")
 
     def test_proof_step_commit_changed(self) -> None:
-        self.replace(PRIV, 'COMMIT = "9cefdd7578bfb04e1f52203f340b5dffd3572a98"', f'COMMIT = "{GOOD_SHA}"')
+        self.replace(PRIV, 'COMMIT = "8625c4defd22f223d103fc94cbb74064804fe065"', f'COMMIT = "{GOOD_SHA}"')
         self.assertRefused("REFUSAL_ONLY")
 
     def test_proof_step_prints_the_record(self) -> None:
@@ -542,41 +542,47 @@ class FirstStepBehaviourTest(unittest.TestCase):
 
 
 
-class BrokerDiscoveryBehavior(unittest.TestCase):
-    def execute_discovery(self, request_url):
-        with tempfile.TemporaryDirectory() as folder:
-            tree = ast.parse(policy.PROOF_STEP_SCRIPT)
-            for node in tree.body:
-                if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "CONFIG" for t in node.targets):
-                    node.value = ast.parse("pathlib.Path(" + repr(str(pathlib.Path(folder) / "absent.json")) + ")", mode="eval").body
-            ast.fix_missing_locations(tree)
-            out = io.StringIO()
-            env = {} if request_url is None else {"ACTIONS_ID_TOKEN_REQUEST_URL": request_url}
-            with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out), mock.patch("urllib.request.urlopen", side_effect=AssertionError("network forbidden")), mock.patch("tempfile.mkdtemp", side_effect=AssertionError("module work forbidden")):
-                with self.assertRaises(SystemExit) as stopped:
-                    exec(compile(tree, "reviewed-proof", "exec"), {})
-            return stopped.exception.code, out.getvalue()
+class ImmutableHandoffSensitivity(PlantCase):
+    def test_each_security_boundary_is_canonical(self):
+        mutations = (
+            ('modules = bootstrap.load_verified_bundle(supplier, lease_path / "launch.json")',
+             'modules = {}'),
+            ('if hashlib.sha256(raw).hexdigest() != BOOTSTRAP_DIGEST:', 'if False:'),
+            ('if locator != str(supplier):', 'if False:'),
+            ('if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:', 'if False:'),
+            ('or stat.S_IMODE(info.st_mode) != mode or info.st_nlink != 1', 'or False'),
+            ('if (manifest.get("modules") != MODULES or manifest.get("starter_commit") != COMMIT',
+             'if (False'),
+            ('admission_digest=installation["admission_digest"],', 'admission_digest=None,'),
+            ('supplier_digest=installation["supplier_digest"],', 'supplier_digest=None,'),
+            ('oidc_pinned=pinned,', 'oidc_pinned=None,'),
+            ('require_pinned=True,', 'require_pinned=False,'),
+            ('oidc_request_started=client.token_request_started,', 'oidc_request_started=None,'),
+            ('wireguard_guard=client.wireguard_check,', 'wireguard_guard=None,'),
+            ('wireguard_guard=client.wireguard_check,', 'wireguard_guard=lambda digest: None,'),
+            ('client.record_proof("BOUNDED_PROOF")', 'pass'),
+            ('client.record_proof("REFUSED")', 'pass'),
+            ('oidc_broker_origin=pinned.origin,', 'oidc_broker_origin=config["oidc_broker_origin"],'),
+            ('refuse("bootstrap")', 'print(os.environ)'),
+            ('refuse("handoff")', 'print(str(sys.exc_info()[1]))'),
+        )
+        original = self.read(PRIV)
+        for old, new in mutations:
+            with self.subTest(boundary=old):
+                self.write(PRIV, original)
+                self.replace(PRIV, old, new)
+                self.assertRefused("REFUSAL_ONLY")
 
-    def test_discovery_reports_only_origin_without_token_or_network(self):
-        status, output = self.execute_discovery("https://example.actions.githubusercontent.com/private/idtoken?api-version=2.0")
-        self.assertEqual(status, 0)
-        value = json.loads(output)
-        self.assertEqual(value, {"lane3_oidc_broker_discovery": "OBSERVED", "oidc_broker_origin": "https://example.actions.githubusercontent.com", "token_requested": False, "kv_read_attempted": False})
-        self.assertNotIn("private", output)
-        self.assertNotIn("api-version", output)
-
-    def test_discovery_refuses_unapproved_domain(self):
-        status, output = self.execute_discovery("https://evil.example/idtoken?api-version=2.0")
-        self.assertEqual(status, 1)
-        self.assertNotIn("OBSERVED", output)
-
-    def test_discovery_refuses_userinfo(self):
-        status, _ = self.execute_discovery("https://user@example.actions.githubusercontent.com/idtoken")
-        self.assertEqual(status, 1)
-
-    def test_discovery_requires_actions_metadata(self):
-        status, _ = self.execute_discovery(None)
-        self.assertEqual(status, 1)
+    def test_token_or_kv_before_handoff_is_refused(self):
+        for early in ('os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]', 'source.read()',
+                      'urllib.request.urlopen("https://supplier.example")',
+                      'subprocess.run(["sudo", "wg", "show"])'):
+            with self.subTest(early=early):
+                original = self.read(PRIV)
+                self.replace(PRIV, '          # No token read, supplier construction, WireGuard inspection or KV call above.',
+                             '          ' + early + '\n          # No token read, supplier construction, WireGuard inspection or KV call above.')
+                self.assertRefused("REFUSAL_ONLY")
+                self.write(PRIV, original)
 
 
 class ReadFailureDisclosure(unittest.TestCase):
@@ -595,7 +601,7 @@ class ReadFailureDisclosure(unittest.TestCase):
         out = []
         source_module = type("SourceModule", (), {"TopologySourceUnavailable": self.SourceError})
         exec(compile(ast.fix_missing_locations(module), "failure-projection", "exec"),
-             {"exc": error, "source_module": source_module, "refuse": out.append})
+             {"exc": error, "source_module": source_module, "proof_refused": out.append})
         return out
 
     def test_source_reason_survives_formatted_args(self):

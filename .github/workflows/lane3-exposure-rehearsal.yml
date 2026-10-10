@@ -54,34 +54,38 @@ jobs:
               sys.exit(1)
           print("dispatch grammar accepted: " + title)
       - name: Prove the B7 OIDC-to-KV read, value-free
+        env:
+          STARTER_REVISION: ${{ inputs.starter_revision }}
         shell: python3 -I {0}
         run: |
           import hashlib
-          import importlib
           import json
           import os
           import pathlib
+          import re
           import stat
           import sys
-          import tempfile
-          import urllib.request
+          import types
 
-          COMMIT = "9cefdd7578bfb04e1f52203f340b5dffd3572a98"
+          # DRAFT supplier source pin only; this revision is not an admission decision.
+          COMMIT = "8625c4defd22f223d103fc94cbb74064804fe065"
           MODULES = {
-              "lane3_topology": "418c87cf6fdbb56d8d391f9efaf1c0ca7618fff1fcc43261e9266c05268e97a6",
-              "lane3_topology_source": "2cf05c02adb7a4ece3ac00a494abd2569e80641151386025b0c76dac32b76ed1",
-              "lane3_openbao_topology": "2315721bdcaa6f581b26b355c4e65bea0fdf69e5ebfa19431ca8467ea6c3151d",
-              "lane3_github_oidc": "70a0592960863d296ad4e8870030494d997527fd76f1a3a4caf1384a3ead9312",
-              "lane3_wireguard_topology": "b026fc7348c4497f1d6fa5c718dd703a4b119174f44a71fbf8164c4f465acf91",
+              "lane3_topology.py": "418c87cf6fdbb56d8d391f9efaf1c0ca7618fff1fcc43261e9266c05268e97a6",
+              "lane3_topology_source.py": "83f590635439e8b5f2faa1d33f3a9ad430350b5dd976aacacba5c8cb088756db",
+              "lane3_openbao_topology.py": "2315721bdcaa6f581b26b355c4e65bea0fdf69e5ebfa19431ca8467ea6c3151d",
+              "lane3_github_oidc.py": "0472a5783aa68bea07f59191ad28a3d0f766616a2cc3b93e61bf25151c8f6135",
+              "lane3_wireguard_topology.py": "356fef42f4304418b91dc795dfd7d99263469de07e501d421860168a5de1b06a",
+              "lane3_broker_origin.py": "6b1ee5f5afa9fc5f3f2e2f748dbf3c015feee6bbdb69240df4f70ea4d98c41a9",
+              "lane3_handoff_protocol.py": "acddc0c5ffa3eba1fce3ac17eac3e454f362d301934a720dc40473d8a93d47cd",
+              "lane3_handoff_client.py": "a6123b5ed3a8ce2d2ca92ecc68d0b7086dbb4424a5a342b74ec728e52317e96d",
+              "lane3_handoff_bootstrap.py": "861c72440f4f42e3323adcf05feebd43daa1875db826df6594f63ebeae0808ce"
           }
+          BOOTSTRAP_DIGEST = "861c72440f4f42e3323adcf05feebd43daa1875db826df6594f63ebeae0808ce"
+          RUN_ROOT = pathlib.Path("/run/dotmac-lane3-handoff")
           CONFIG = pathlib.Path("/etc/dotmac-lane3/openbao-wireguard.json")
           FIELDS = {
-              "endpoint_address",
-              "source_address",
-              "interface",
-              "expected_local_public_key",
-              "expected_peer_public_key",
-              "oidc_broker_origin",
+              "endpoint_address", "source_address", "interface",
+              "expected_local_public_key", "expected_peer_public_key", "oidc_broker_origin",
           }
           EXPECTED_VERSION = 1
 
@@ -141,48 +145,6 @@ jobs:
                   return "oidc.validation.shape"
 
 
-          def oidc_origin_mismatch_metadata(request_url, approved_origin):
-              # Observe only a bounded public hostname; never return raw URL components.
-              import re
-              from urllib.parse import urlsplit
-              unavailable = {
-                  "observed_origin": None,
-                  "hostname_matches_configured": False,
-                  "explicit_port_present": False,
-                  "port_is_443": False,
-                  "userinfo_present": False,
-              }
-              if not isinstance(request_url, str) or not isinstance(approved_origin, str):
-                  return unavailable
-              try:
-                  if any(c.isspace() for c in request_url + approved_origin):
-                      return unavailable
-                  request = urlsplit(request_url)
-                  configured = urlsplit(approved_origin)
-                  for parsed in (request, configured):
-                      hostname = parsed.hostname
-                      if (parsed.scheme != "https" or not hostname
-                              or len(hostname) > 253
-                              or not hostname.endswith(".actions.githubusercontent.com")
-                              or any(len(label) > 63 or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) is None
-                                     for label in hostname.split("."))):
-                          return unavailable
-                      # Accessing port rejects malformed and out-of-range ports.
-                      port = parsed.port
-                      if parsed.netloc.rsplit("@", 1)[-1].endswith(":"):
-                          return unavailable
-                  port = request.port
-                  return {
-                      "observed_origin": "https://" + request.hostname,
-                      "hostname_matches_configured": request.hostname == configured.hostname,
-                      "explicit_port_present": port is not None,
-                      "port_is_443": port == 443,
-                      "userinfo_present": request.username is not None or request.password is not None,
-                  }
-              except Exception:
-                  return unavailable
-
-
           def read_config(path):
               # Walk from / using pinned directory descriptors; never follow symlinks.
               directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -209,30 +171,149 @@ jobs:
                   os.close(directory)
 
 
-          # Approved first stage: no config means metadata observation only.
-          # No HTTP request, module download, token read or private tunnel contact.
-          try:
-              CONFIG.lstat()
-          except FileNotFoundError:
-              from urllib.parse import urlsplit
+          def protected_directory(path):
+              # Environment values are locators only. Walk every component from root.
+              raw = str(path)
+              if not raw.startswith("/") or "//" in raw or any(p in (".", "..") for p in raw.split("/")):
+                  raise ValueError()
+              flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              directory = os.open("/", flags)
               try:
-                  request = urlsplit(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"])
-                  if (request.scheme != "https" or not request.hostname
-                          or not request.hostname.endswith(".actions.githubusercontent.com")
-                          or request.netloc != request.hostname or request.fragment):
-                      refuse("discovery.origin")
-              except (KeyError, ValueError):
-                  refuse("discovery.origin")
-              print(json.dumps({
-                  "lane3_oidc_broker_discovery": "OBSERVED",
-                  "oidc_broker_origin": "https://" + request.hostname,
-                  "token_requested": False,
-                  "kv_read_attempted": False,
-              }, sort_keys=True))
-              sys.exit(0)  # The next step still performs the final refusal.
-          except OSError:
-              refuse("config.read")
+                  info = os.fstat(directory)
+                  if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
+                      raise ValueError()
+                  for part in raw.split("/")[1:]:
+                      child = os.open(part, flags, dir_fd=directory)
+                      os.close(directory)
+                      directory = child
+                      info = os.fstat(directory)
+                      if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
+                          raise ValueError()
+                  return directory
+              except BaseException:
+                  os.close(directory)
+                  raise
 
+
+          def protected_file(directory, name, mode, gid):
+              descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                                   dir_fd=directory)
+              try:
+                  info = os.fstat(descriptor)
+                  if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != gid
+                          or stat.S_IMODE(info.st_mode) != mode or info.st_nlink != 1
+                          or not 0 < info.st_size <= 1048576):
+                      raise ValueError()
+                  with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                      raw = stream.read(1048577)
+                  after = os.fstat(descriptor)
+                  if (len(raw) != info.st_size or (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+                          != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+                      raise ValueError()
+                  return raw
+              finally:
+                  os.close(descriptor)
+
+
+          def strict_record(raw):
+              def pairs(items):
+                  result = {}
+                  for key, value in items:
+                      if key in result:
+                          raise ValueError()
+                      result[key] = value
+                  return result
+              def reject(value):
+                  raise ValueError()
+              value = json.loads(raw, object_pairs_hook=pairs, parse_constant=reject)
+              if type(value) is not dict:
+                  raise ValueError()
+              return value
+
+
+          def verified_supplier():
+              lease = os.environ.get("DOTMAC_LANE3_LEASE_ID", "")
+              locator = os.environ.get("DOTMAC_LANE3_SUPPLIER_DIR", "")
+              if re.fullmatch(r"[0-9a-f]{32}", lease) is None:
+                  raise ValueError()
+              lease_path = RUN_ROOT / lease
+              supplier = lease_path / "supplier"
+              # Compare raw text before Path can normalize traversal or separators.
+              if locator != str(supplier):
+                  raise ValueError()
+              lfd = protected_directory(str(lease_path))
+              try:
+                  linfo = os.fstat(lfd)
+                  if stat.S_IMODE(linfo.st_mode) != 0o750:
+                      raise ValueError()
+                  gid = linfo.st_gid
+                  dfd = protected_directory(locator)
+                  try:
+                      dinfo = os.fstat(dfd)
+                      if stat.S_IMODE(dinfo.st_mode) != 0o550 or dinfo.st_gid != gid:
+                          raise ValueError()
+                      manifest = strict_record(protected_file(dfd, "supplier-installation.json", 0o440, gid))
+                      if (manifest.get("modules") != MODULES or manifest.get("starter_commit") != COMMIT
+                              or set(os.listdir(dfd)) != set(MODULES) | {"supplier-installation.json"}):
+                          raise ValueError()
+                      raw = protected_file(dfd, "lane3_handoff_bootstrap.py", 0o440, gid)
+                      if hashlib.sha256(raw).hexdigest() != BOOTSTRAP_DIGEST:
+                          raise ValueError()
+                      launch = strict_record(protected_file(lfd, "launch.json", 0o640, gid))
+                  finally:
+                      os.close(dfd)
+              finally:
+                  os.close(lfd)
+              # Only the exact root-staged bootstrap bytes may execute before verification.
+              bootstrap = types.ModuleType("lane3_handoff_bootstrap")
+              bootstrap.__file__ = str(supplier / "lane3_handoff_bootstrap.py")
+              sys.modules[bootstrap.__name__] = bootstrap
+              exec(compile(raw, bootstrap.__file__, "exec"), bootstrap.__dict__)
+              modules = bootstrap.load_verified_bundle(supplier, lease_path / "launch.json")
+              # The trusted loader validates boot, original 45s launch budget, both digests,
+              # all file hashes, exact closure and isolated imports before returning.
+              return lease, gid, manifest, launch, modules
+
+
+          try:
+              lease, gid, installation, launch, modules = verified_supplier()
+          except Exception:
+              refuse("bootstrap")
+
+          try:
+              if os.environ.get("STARTER_REVISION") != COMMIT:
+                  refuse("handoff.source")
+              request_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+              client_module = modules["lane3_handoff_client"]
+              expectation = client_module.LocalExpectation(
+                  repository_id=int(os.environ["GITHUB_REPOSITORY_ID"]),
+                  run_id=int(os.environ["GITHUB_RUN_ID"]),
+                  run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                  workflow_sha=os.environ["GITHUB_WORKFLOW_SHA"],
+                  starter_commit=COMMIT,
+                  admission_digest=installation["admission_digest"],
+                  supplier_digest=installation["supplier_digest"],
+              )
+              # Numeric job/runner IDs and workflow blob are independently API-qualified
+              # by the coordinator/controller. github.job is a key, never a numeric ID.
+              client = client_module.HandoffClient(
+                  lease_id=lease, run_root=str(RUN_ROOT), expected_uid=0, expected_gid=gid,
+              )
+              pinned = client.obtain_from_launch(request_url=request_url, expectation=expectation)
+          except Exception:
+              refuse("handoff")
+
+          def proof_refused(stage):
+              # Best effort only: an interrupted callback or record keeps UNKNOWN.
+              # Never infer that a refused read proves no credential issuance.
+              try:
+                  client.record_proof("REFUSED")
+              except Exception:
+                  pass
+              refuse(stage)
+
+
+          # No token read, supplier construction, WireGuard inspection or KV call above.
           try:
               config = read_config(CONFIG)
           except (OSError, ValueError):
@@ -240,47 +321,28 @@ jobs:
           if not isinstance(config, dict) or set(config) != FIELDS:
               refuse("config.fields")
 
-          work = pathlib.Path(tempfile.mkdtemp(prefix="lane3-proof-"))
-          for name, digest in MODULES.items():
-              url = "https://raw.githubusercontent.com/michaelayoade/dotmac_starter_mt/" + COMMIT + "/scripts/" + name + ".py"
-              try:
-                  with urllib.request.urlopen(url, timeout=15) as response:
-                      body = response.read(1048577)
-              except OSError:
-                  refuse("module." + name)
-              if len(body) > 1048576 or hashlib.sha256(body).hexdigest() != digest:
-                  refuse("module." + name)
-              (work / (name + ".py")).write_bytes(body)
-          sys.path.insert(0, str(work))
-
           try:
-              source_module = importlib.import_module("lane3_topology_source")
-              topology_module = importlib.import_module("lane3_topology")
-              oidc_module = importlib.import_module("lane3_github_oidc")
+              source_module = modules["lane3_topology_source"]
+              topology_module = modules["lane3_topology"]
+              oidc_module = modules["lane3_github_oidc"]
               validation = oidc_validation_category(
-                  os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""),
+                  request_url,
                   os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", ""),
-                  config["oidc_broker_origin"],
+                  pinned.origin,
                   oidc_module.MAX_RESPONSE,
               )
               if validation is not None:
-                  if validation == "oidc.validation.netloc":
-                      metadata = oidc_origin_mismatch_metadata(
-                          os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""),
-                          config["oidc_broker_origin"],
-                      )
-                      print(json.dumps({
-                          "lane3_oidc_origin_mismatch": (
-                              "OBSERVED" if metadata["observed_origin"] is not None else "UNAVAILABLE"
-                          ),
-                          **metadata,
-                      }, sort_keys=True))
-                  refuse(validation)
+                  proof_refused(validation)
               source = source_module.wireguard_github_openbao_source(
+                  # Fresh root read-only checks preserve the unprivileged NNP job.
+                  wireguard_guard=client.wireguard_check,
+                  oidc_request_started=client.token_request_started,
+                  oidc_pinned=pinned,
+                  require_pinned=True,
                   expected_version=EXPECTED_VERSION,
-                  jwt_request_url=os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],
+                  jwt_request_url=request_url,
                   jwt_request_token=os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],
-                  oidc_broker_origin=config["oidc_broker_origin"],
+                  oidc_broker_origin=pinned.origin,
                   endpoint_address=config["endpoint_address"],
                   source_address=config["source_address"],
                   interface=config["interface"],
@@ -307,14 +369,19 @@ jobs:
                       if exc.reason == label:
                           category = label
                           break
-              refuse("read." + category)
+              proof_refused("read." + category)
           if reading.kv_version != EXPECTED_VERSION:
-              refuse("version")
+              proof_refused("version")
+          try:
+              client.record_proof("BOUNDED_PROOF")
+          except Exception:
+              refuse("proof.record")
           print(json.dumps({
               "lane3_oidc_kv_read": "PASS",
               "kv_version": reading.kv_version,
               "structure": topology.structure(),
               "starter_commit": COMMIT,
+              "gate0_accepted": False,
           }, sort_keys=True))
       - name: Refuse until Lane 3 execution is admitted
         shell: bash
