@@ -91,11 +91,34 @@ jobs:
               sys.exit(1)
 
 
+          def read_config(path):
+              # Walk from / using pinned directory descriptors; never follow symlinks.
+              directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+              try:
+                  for part in path.parts[1:-1]:
+                      child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                      dir_fd=directory)
+                      os.close(directory)
+                      directory = child
+                      info = os.fstat(directory)
+                      if info.st_uid != 0 or info.st_mode & 0o022:
+                          refuse("config.parent")
+                  descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                       dir_fd=directory)
+                  with os.fdopen(descriptor, "rb") as stream:
+                      info = os.fstat(stream.fileno())
+                      if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                          refuse("config.ownership")
+                      raw = stream.read(65537)
+                      if len(raw) > 65536:
+                          refuse("config.size")
+                      return json.loads(raw)
+              finally:
+                  os.close(directory)
+
+
           try:
-              info = CONFIG.lstat()
-              if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-                  refuse("config.ownership")
-              config = json.loads(CONFIG.read_text(encoding="utf-8"))
+              config = read_config(CONFIG)
           except (OSError, ValueError):
               refuse("config.read")
           if not isinstance(config, dict) or set(config) != FIELDS:

@@ -315,6 +315,14 @@ class GrammarTest(PlantCase):
 
 
 class RefusalOnlyTest(PlantCase):
+    def test_proof_config_no_follow_removed(self):
+        self.replace(PRIV, " | os.O_NOFOLLOW", "")
+        self.assertRefused("REFUSAL_ONLY")
+
+    def test_proof_config_parent_ownership_removed(self):
+        self.replace(PRIV, 'refuse("config.parent")', 'pass')
+        self.assertRefused("REFUSAL_ONLY")
+
     def test_proof_step_removed(self) -> None:
         text = self.read(PRIV)
         start = text.index("      - name: Prove the B7 OIDC-to-KV read")
