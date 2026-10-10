@@ -4,6 +4,7 @@ import ast
 import contextlib
 import importlib
 import io
+import json
 import os
 import pathlib
 import sys
@@ -29,6 +30,10 @@ class OidcValidationTest(unittest.TestCase):
         namespace = {}
         exec(compile(ast.Module(body=[helper], type_ignores=[]), "validation", "exec"), namespace)
         cls.validate = staticmethod(namespace["oidc_validation_category"])
+        helper = next(n for n in cls.tree.body if isinstance(n, ast.FunctionDef)
+                      and n.name == "oidc_origin_mismatch_metadata")
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "metadata", "exec"), namespace)
+        cls.metadata = staticmethod(namespace["oidc_origin_mismatch_metadata"])
 
     def category(self, url=None, token=None, origin=None):
         return self.validate(self.URL if url is None else url,
@@ -127,7 +132,8 @@ class OidcValidationTest(unittest.TestCase):
         def refuse(stage):
             print("::error::Lane 3 OIDC-to-KV read proof refused at " + stage)
             raise SystemExit(1)
-        namespace = {"os": os, "importlib": importlib, "refuse": refuse,
+        namespace = {"os": os, "importlib": importlib, "json": json, "refuse": refuse,
+                     "oidc_origin_mismatch_metadata": self.metadata,
                      "EXPECTED_VERSION": 1, "oidc_validation_category": self.validate,
                      "config": dict.fromkeys(("oidc_broker_origin", "endpoint_address", "source_address",
                                               "interface", "expected_local_public_key", "expected_peer_public_key"), "marker")}
@@ -154,7 +160,91 @@ class OidcValidationTest(unittest.TestCase):
         ):
             with self.subTest(category=category):
                 output, construct, read = self.execute_source_step(url)
-                self.assertEqual(output, "::error::Lane 3 OIDC-to-KV read proof refused at oidc.validation." + category + "\n")
+                lines = output.splitlines()
+                if category == "netloc":
+                    self.assertEqual(len(lines), 2)
+                    self.assertEqual(json.loads(lines[0]), {
+                        "lane3_oidc_origin_mismatch": "OBSERVED",
+                        **self.metadata(url, self.ORIGIN),
+                    })
+                else:
+                    self.assertEqual(len(lines), 1)
+                self.assertEqual(lines[-1], "::error::Lane 3 OIDC-to-KV read proof refused at oidc.validation." + category)
+                self.assertNotIn("private-query-marker", output)
+                self.assertNotIn("private-user-marker", output)
+                self.assertNotIn(self.TOKEN, output)
+                construct.assert_not_called()
+                read.assert_not_called()
+
+    def test_metadata_fixed_schema_and_port_flags(self):
+        for authority, host, explicit, is_443, userinfo in (
+            ("synthetic.actions.githubusercontent.com", "synthetic", False, False, False),
+            ("rotated.actions.githubusercontent.com", "rotated", False, False, False),
+            ("synthetic.actions.githubusercontent.com:443", "synthetic", True, True, False),
+            ("synthetic.actions.githubusercontent.com:8443", "synthetic", True, False, False),
+            ("private-user-marker:private-password-marker@synthetic.actions.githubusercontent.com:443",
+             "synthetic", True, True, True),
+        ):
+            with self.subTest(authority=authority):
+                url = "https://" + authority + "/private-path-marker/idtoken?private-query-marker#private-fragment-marker"
+                result = self.metadata(url, self.ORIGIN)
+                self.assertEqual(result, {
+                    "observed_origin": "https://" + host + ".actions.githubusercontent.com",
+                    "hostname_matches_configured": host == "synthetic",
+                    "explicit_port_present": explicit,
+                    "port_is_443": is_443,
+                    "userinfo_present": userinfo,
+                })
+                self.assertNotIn("private-", json.dumps(result))
+
+    def test_metadata_rejects_forbidden_hosts_and_malformed_inputs(self):
+        unavailable = {
+            "observed_origin": None,
+            "hostname_matches_configured": False,
+            "explicit_port_present": False,
+            "port_is_443": False,
+            "userinfo_present": False,
+        }
+        forbidden_hosts = (
+            "private-host-marker.example", "actions.githubusercontent.com",
+            "synthetic.actions.githubusercontent.com.evil.example",
+            "synthetic.actions.githubusercontent.com.", "private_marker.actions.githubusercontent.com",
+            ".actions.githubusercontent.com", "synthetic..actions.githubusercontent.com",
+            "x" * 64 + ".actions.githubusercontent.com",
+            ".".join(["x" * 63] * 4) + ".actions.githubusercontent.com",
+            "synthetic%2eactions.githubusercontent.com", "syntheticé.actions.githubusercontent.com",
+            "-synthetic.actions.githubusercontent.com", "synthetic-.actions.githubusercontent.com",
+        )
+        malformed = (
+            None, object(), b"private-bytes-marker", 42,
+            "https://[private-parse-marker", "http://synthetic.actions.githubusercontent.com",
+            self.ORIGIN + ":private-port-marker/idtoken", self.ORIGIN + ":65536/idtoken",
+            self.ORIGIN + ":/idtoken", self.ORIGIN + ":-1/idtoken",
+            "https://synthetic.actions.githubuserconten\nt.com/idtoken",
+            " " + self.URL, "https:///private-missing-host-marker",
+        )
+        for value in (*malformed, *("https://" + h + "/idtoken" for h in forbidden_hosts)):
+            with self.subTest(value=value):
+                self.assertEqual(self.metadata(value, self.ORIGIN), unavailable)
+                self.assertEqual(self.metadata(self.URL, value), unavailable)
+
+    def test_unavailable_netloc_metadata_still_refuses_before_constructor(self):
+        for url in ("https://private-host-marker.example/private-path-marker/idtoken?private-query-marker",
+                    self.ORIGIN + ":private-port-marker/idtoken?private-query-marker"):
+            with self.subTest(url=url):
+                output, construct, read = self.execute_source_step(url)
+                lines = output.splitlines()
+                self.assertEqual(len(lines), 2)
+                self.assertEqual(json.loads(lines[0]), {
+                    "lane3_oidc_origin_mismatch": "UNAVAILABLE",
+                    "observed_origin": None,
+                    "hostname_matches_configured": False,
+                    "explicit_port_present": False,
+                    "port_is_443": False,
+                    "userinfo_present": False,
+                })
+                self.assertEqual(lines[1], "::error::Lane 3 OIDC-to-KV read proof refused at oidc.validation.netloc")
+                self.assertNotIn("private-", output)
                 construct.assert_not_called()
                 read.assert_not_called()
 
