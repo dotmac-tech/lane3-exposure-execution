@@ -28,6 +28,7 @@ jobs:
     environment: lane3-rehearsal-protected
     permissions:
       contents: read
+      id-token: write
     timeout-minutes: 5
     steps:
       - name: Validate the dispatch grammar before anything else
@@ -52,6 +53,93 @@ jobs:
               print("::error::dispatch inputs do not match the Lane 3 grammar; refusing")
               sys.exit(1)
           print("dispatch grammar accepted: " + title)
+      - name: Prove the B7 OIDC-to-KV read, value-free
+        shell: python3 -I {0}
+        run: |
+          import hashlib
+          import importlib
+          import json
+          import os
+          import pathlib
+          import stat
+          import sys
+          import tempfile
+          import urllib.request
+
+          COMMIT = "9cefdd7578bfb04e1f52203f340b5dffd3572a98"
+          MODULES = {
+              "lane3_topology": "418c87cf6fdbb56d8d391f9efaf1c0ca7618fff1fcc43261e9266c05268e97a6",
+              "lane3_topology_source": "2cf05c02adb7a4ece3ac00a494abd2569e80641151386025b0c76dac32b76ed1",
+              "lane3_openbao_topology": "2315721bdcaa6f581b26b355c4e65bea0fdf69e5ebfa19431ca8467ea6c3151d",
+              "lane3_github_oidc": "70a0592960863d296ad4e8870030494d997527fd76f1a3a4caf1384a3ead9312",
+              "lane3_wireguard_topology": "b026fc7348c4497f1d6fa5c718dd703a4b119174f44a71fbf8164c4f465acf91",
+          }
+          CONFIG = pathlib.Path("/etc/dotmac-lane3/openbao-wireguard.json")
+          FIELDS = {
+              "endpoint_address",
+              "source_address",
+              "interface",
+              "expected_local_public_key",
+              "expected_peer_public_key",
+              "oidc_broker_origin",
+          }
+          EXPECTED_VERSION = 1
+
+
+          def refuse(stage):
+              print("::error::Lane 3 OIDC-to-KV read proof refused at " + stage)
+              sys.exit(1)
+
+
+          try:
+              info = CONFIG.lstat()
+              if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                  refuse("config.ownership")
+              config = json.loads(CONFIG.read_text(encoding="utf-8"))
+          except (OSError, ValueError):
+              refuse("config.read")
+          if not isinstance(config, dict) or set(config) != FIELDS:
+              refuse("config.fields")
+
+          work = pathlib.Path(tempfile.mkdtemp(prefix="lane3-proof-"))
+          for name, digest in MODULES.items():
+              url = "https://raw.githubusercontent.com/michaelayoade/dotmac_starter_mt/" + COMMIT + "/scripts/" + name + ".py"
+              try:
+                  with urllib.request.urlopen(url, timeout=15) as response:
+                      body = response.read(1048577)
+              except OSError:
+                  refuse("module." + name)
+              if len(body) > 1048576 or hashlib.sha256(body).hexdigest() != digest:
+                  refuse("module." + name)
+              (work / (name + ".py")).write_bytes(body)
+          sys.path.insert(0, str(work))
+
+          try:
+              source_module = importlib.import_module("lane3_topology_source")
+              topology_module = importlib.import_module("lane3_topology")
+              source = source_module.wireguard_github_openbao_source(
+                  expected_version=EXPECTED_VERSION,
+                  jwt_request_url=os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],
+                  jwt_request_token=os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],
+                  oidc_broker_origin=config["oidc_broker_origin"],
+                  endpoint_address=config["endpoint_address"],
+                  source_address=config["source_address"],
+                  interface=config["interface"],
+                  expected_local_public_key=config["expected_local_public_key"],
+                  expected_peer_public_key=config["expected_peer_public_key"],
+              )
+              reading = source.read()
+              topology = topology_module.parse_topology_record(reading.record)
+          except Exception as exc:
+              refuse("read." + type(exc).__name__)
+          if reading.kv_version != EXPECTED_VERSION:
+              refuse("version")
+          print(json.dumps({
+              "lane3_oidc_kv_read": "PASS",
+              "kv_version": reading.kv_version,
+              "structure": topology.structure(),
+              "starter_commit": COMMIT,
+          }, sort_keys=True))
       - name: Refuse until Lane 3 execution is admitted
         shell: bash
         run: |

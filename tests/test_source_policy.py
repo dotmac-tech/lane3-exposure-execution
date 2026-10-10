@@ -185,7 +185,11 @@ class JobShapeTest(PlantCase):
         self.assertRefused("JOB_SHAPE")
 
     def test_job_permission_widened(self) -> None:
-        self.replace(PRIV, "      contents: read\n", "      contents: read\n      id-token: write\n")
+        self.replace(PRIV, "      id-token: write\n", "      id-token: write\n      actions: write\n")
+        self.assertRefused("JOB_SHAPE")
+
+    def test_job_loses_id_token(self) -> None:
+        self.replace(PRIV, "      id-token: write\n", "")
         self.assertRefused("JOB_SHAPE")
 
     def test_top_permissions_widened(self) -> None:
@@ -311,6 +315,40 @@ class GrammarTest(PlantCase):
 
 
 class RefusalOnlyTest(PlantCase):
+    def test_proof_step_removed(self) -> None:
+        text = self.read(PRIV)
+        start = text.index("      - name: Prove the B7 OIDC-to-KV read")
+        end = text.index("      - name: Refuse until")
+        self.write(PRIV, text[:start] + text[end:])
+        self.assertRefused("REFUSAL_ONLY")
+
+    def test_proof_step_after_refusal(self) -> None:
+        text = self.read(PRIV)
+        start = text.index("      - name: Prove the B7 OIDC-to-KV read")
+        end = text.index("      - name: Refuse until")
+        self.write(PRIV, text[:start] + text[end:] + text[start:end])
+        self.assertRefused("REFUSAL_ONLY")
+
+    def test_proof_step_module_pin_changed(self) -> None:
+        self.replace(PRIV, "418c87cf6fdbb56d8d391f9efaf1c0ca7618fff1fcc43261e9266c05268e97a6", "0" * 64)
+        self.assertRefused("REFUSAL_ONLY")
+
+    def test_proof_step_commit_changed(self) -> None:
+        self.replace(PRIV, 'COMMIT = "9cefdd7578bfb04e1f52203f340b5dffd3572a98"', f'COMMIT = "{GOOD_SHA}"')
+        self.assertRefused("REFUSAL_ONLY")
+
+    def test_proof_step_prints_the_record(self) -> None:
+        self.replace(PRIV, "    reading = source.read()\n", "    reading = source.read()\n          print(reading.record)\n")
+        self.assertRefused("REFUSAL_ONLY")
+
+    def test_proof_step_continue_on_error(self) -> None:
+        self.replace(
+            PRIV,
+            "      - name: Prove the B7 OIDC-to-KV read, value-free\n",
+            "      - name: Prove the B7 OIDC-to-KV read, value-free\n        continue-on-error: true\n",
+        )
+        self.assertRefused("REFUSAL_ONLY")
+
     def test_checkout_added(self) -> None:
         self.replace(
             PRIV,

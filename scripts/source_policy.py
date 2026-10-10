@@ -67,8 +67,8 @@ Each rule has a stable code that the tests assert:
 - ``GRAMMAR``: ``dispatch-grammar.txt`` differs from the regex the first step
   enforces, or the first step is not the exact grammar check.
 - ``REFUSAL_ONLY``: the privileged job runs anything after the grammar check
-  except the pinned refusal step, uses an action, or interpolates an
-  expression into a script.
+  except the pinned OIDC-to-KV read proof step and then the pinned refusal
+  step, uses an action, or interpolates an expression into a script.
 - ``IP_LITERAL``: a tracked file contains an IP literal outside loopback,
   unspecified and documentation ranges.
 - ``SECRETS_VARS``: the privileged workflow references ``secrets`` or
@@ -110,7 +110,7 @@ ADMITTED_JOB_KEYS = {
     "timeout-minutes",
     "steps",
 }
-JOB_PERMISSIONS = {"contents": "read"}
+JOB_PERMISSIONS = {"contents": "read", "id-token": "write"}
 
 GRAMMAR_STEP_SHELL = "python3 -I {0}"
 GRAMMAR_STEP_ENV = {
@@ -138,6 +138,14 @@ if re.fullmatch(GRAMMAR, title) is None:
     sys.exit(1)
 print("dispatch grammar accepted: " + title)
 '''
+PROOF_STEP_NAME = "Prove the B7 OIDC-to-KV read, value-free"
+PROOF_STEP_SHELL = "python3 -I {0}"
+#: The bounded OIDC-to-KV read proof, exactly. It downloads Starter's reader
+#: modules at one pinned commit, checks each SHA-256, reads the B7 topology
+#: record through the pinned WireGuard transport and prints only value-free
+#: evidence. The job still ends in the refusal step.
+PROOF_STEP_SCRIPT = 'import hashlib\nimport importlib\nimport json\nimport os\nimport pathlib\nimport stat\nimport sys\nimport tempfile\nimport urllib.request\n\nCOMMIT = "9cefdd7578bfb04e1f52203f340b5dffd3572a98"\nMODULES = {\n    "lane3_topology": "418c87cf6fdbb56d8d391f9efaf1c0ca7618fff1fcc43261e9266c05268e97a6",\n    "lane3_topology_source": "2cf05c02adb7a4ece3ac00a494abd2569e80641151386025b0c76dac32b76ed1",\n    "lane3_openbao_topology": "2315721bdcaa6f581b26b355c4e65bea0fdf69e5ebfa19431ca8467ea6c3151d",\n    "lane3_github_oidc": "70a0592960863d296ad4e8870030494d997527fd76f1a3a4caf1384a3ead9312",\n    "lane3_wireguard_topology": "b026fc7348c4497f1d6fa5c718dd703a4b119174f44a71fbf8164c4f465acf91",\n}\nCONFIG = pathlib.Path("/etc/dotmac-lane3/openbao-wireguard.json")\nFIELDS = {\n    "endpoint_address",\n    "source_address",\n    "interface",\n    "expected_local_public_key",\n    "expected_peer_public_key",\n    "oidc_broker_origin",\n}\nEXPECTED_VERSION = 1\n\n\ndef refuse(stage):\n    print("::error::Lane 3 OIDC-to-KV read proof refused at " + stage)\n    sys.exit(1)\n\n\ntry:\n    info = CONFIG.lstat()\n    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:\n        refuse("config.ownership")\n    config = json.loads(CONFIG.read_text(encoding="utf-8"))\nexcept (OSError, ValueError):\n    refuse("config.read")\nif not isinstance(config, dict) or set(config) != FIELDS:\n    refuse("config.fields")\n\nwork = pathlib.Path(tempfile.mkdtemp(prefix="lane3-proof-"))\nfor name, digest in MODULES.items():\n    url = "https://raw.githubusercontent.com/michaelayoade/dotmac_starter_mt/" + COMMIT + "/scripts/" + name + ".py"\n    try:\n        with urllib.request.urlopen(url, timeout=15) as response:\n            body = response.read(1048577)\n    except OSError:\n        refuse("module." + name)\n    if len(body) > 1048576 or hashlib.sha256(body).hexdigest() != digest:\n        refuse("module." + name)\n    (work / (name + ".py")).write_bytes(body)\nsys.path.insert(0, str(work))\n\ntry:\n    source_module = importlib.import_module("lane3_topology_source")\n    topology_module = importlib.import_module("lane3_topology")\n    source = source_module.wireguard_github_openbao_source(\n        expected_version=EXPECTED_VERSION,\n        jwt_request_url=os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],\n        jwt_request_token=os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],\n        oidc_broker_origin=config["oidc_broker_origin"],\n        endpoint_address=config["endpoint_address"],\n        source_address=config["source_address"],\n        interface=config["interface"],\n        expected_local_public_key=config["expected_local_public_key"],\n        expected_peer_public_key=config["expected_peer_public_key"],\n    )\n    reading = source.read()\n    topology = topology_module.parse_topology_record(reading.record)\nexcept Exception as exc:\n    refuse("read." + type(exc).__name__)\nif reading.kv_version != EXPECTED_VERSION:\n    refuse("version")\nprint(json.dumps({\n    "lane3_oidc_kv_read": "PASS",\n    "kv_version": reading.kv_version,\n    "structure": topology.structure(),\n    "starter_commit": COMMIT,\n}, sort_keys=True))\n'
+PROOF_STEP = {"name": PROOF_STEP_NAME, "shell": PROOF_STEP_SHELL, "run": PROOF_STEP_SCRIPT}
 REFUSAL_STEP = {
     "name": "Refuse until Lane 3 execution is admitted",
     "shell": "bash",
@@ -552,8 +560,10 @@ def check_privileged(workflow: Any, raw: str, grammar: str | None) -> list[str]:
     if first.get("env") != GRAMMAR_STEP_ENV:
         errors.append(f"GRAMMAR: {name} first step env is not exactly the two dispatch inputs")
 
-    if steps[1:] != [REFUSAL_STEP]:
-        errors.append(f"REFUSAL_ONLY: {name} must end in the pinned refusal step and run nothing else")
+    if steps[1:] != [PROOF_STEP, REFUSAL_STEP]:
+        errors.append(
+            f"REFUSAL_ONLY: {name} must run only the pinned OIDC-to-KV proof step, then end in the pinned refusal step"
+        )
     return errors
 
 
