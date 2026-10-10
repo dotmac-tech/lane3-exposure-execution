@@ -8,6 +8,10 @@ itself never carries one and the repository's own IP scan stays meaningful.
 
 from __future__ import annotations
 
+import ast
+import contextlib
+import io
+import json
 import os
 import pathlib
 import re
@@ -16,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -534,6 +539,44 @@ class FirstStepBehaviourTest(unittest.TestCase):
                 title = f"lane3 starter={starter} candidate={candidate}"
                 self.assertEqual(re.fullmatch(self.grammar, title) is None, bool(expected))
 
+
+
+
+class BrokerDiscoveryBehavior(unittest.TestCase):
+    def execute_discovery(self, request_url):
+        with tempfile.TemporaryDirectory() as folder:
+            tree = ast.parse(policy.PROOF_STEP_SCRIPT)
+            for node in tree.body:
+                if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "CONFIG" for t in node.targets):
+                    node.value = ast.parse("pathlib.Path(" + repr(str(pathlib.Path(folder) / "absent.json")) + ")", mode="eval").body
+            ast.fix_missing_locations(tree)
+            out = io.StringIO()
+            env = {} if request_url is None else {"ACTIONS_ID_TOKEN_REQUEST_URL": request_url}
+            with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out), mock.patch("urllib.request.urlopen", side_effect=AssertionError("network forbidden")), mock.patch("tempfile.mkdtemp", side_effect=AssertionError("module work forbidden")):
+                with self.assertRaises(SystemExit) as stopped:
+                    exec(compile(tree, "reviewed-proof", "exec"), {})
+            return stopped.exception.code, out.getvalue()
+
+    def test_discovery_reports_only_origin_without_token_or_network(self):
+        status, output = self.execute_discovery("https://example.actions.githubusercontent.com/private/idtoken?api-version=2.0")
+        self.assertEqual(status, 0)
+        value = json.loads(output)
+        self.assertEqual(value, {"lane3_oidc_broker_discovery": "OBSERVED", "oidc_broker_origin": "https://example.actions.githubusercontent.com", "token_requested": False, "kv_read_attempted": False})
+        self.assertNotIn("private", output)
+        self.assertNotIn("api-version", output)
+
+    def test_discovery_refuses_unapproved_domain(self):
+        status, output = self.execute_discovery("https://evil.example/idtoken?api-version=2.0")
+        self.assertEqual(status, 1)
+        self.assertNotIn("OBSERVED", output)
+
+    def test_discovery_refuses_userinfo(self):
+        status, _ = self.execute_discovery("https://user@example.actions.githubusercontent.com/idtoken")
+        self.assertEqual(status, 1)
+
+    def test_discovery_requires_actions_metadata(self):
+        status, _ = self.execute_discovery(None)
+        self.assertEqual(status, 1)
 
 if __name__ == "__main__":
     unittest.main()
