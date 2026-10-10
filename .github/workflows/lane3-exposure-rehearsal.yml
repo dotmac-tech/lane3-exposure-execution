@@ -182,11 +182,17 @@ jobs:
               category = "unclassified"
               allowed = {
                   "transport.wireguard", "oidc.request", "transport.request",
-                  "expected_version", "source.consumed", "source.deadline",
+                  "expected_version", "source.consumed", "deadline",
+                  "jwt.supplier", "auth.response", "auth.expired",
+                  "kv.response", "kv.metadata", "kv.record", "kv.schema",
+                  "reader.operation", "response.duplicate_field",
+                  "transport.endpoint", "transport.configuration", "transport.operation",
+                  "transport.deadline", "transport.status", "transport.response_size",
+                  "transport.response_shape",
               }
-              if type(exc).__name__ == "TopologySourceUnavailable" and len(exc.args) == 1:
+              if type(exc) is source_module.TopologySourceUnavailable:
                   for label in allowed:
-                      if exc.args[0] == label:
+                      if exc.reason == label:
                           category = label
                           break
               refuse("read." + category)
