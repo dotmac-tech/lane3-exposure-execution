@@ -315,6 +315,14 @@ class GrammarTest(PlantCase):
 
 
 class RefusalOnlyTest(PlantCase):
+    def test_discovery_cannot_request_a_token(self):
+        self.replace(PRIV, '    sys.exit(0)  # The next step still performs the final refusal.', '    pass')
+        self.assertRefused("REFUSAL_ONLY")
+
+    def test_discovery_cannot_print_full_request_url(self):
+        self.replace(PRIV, '"oidc_broker_origin": "https://" + request.hostname,', '"oidc_broker_origin": os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],')
+        self.assertRefused("REFUSAL_ONLY")
+
     def test_proof_config_no_follow_removed(self):
         self.replace(PRIV, " | os.O_NOFOLLOW", "")
         self.assertRefused("REFUSAL_ONLY")
