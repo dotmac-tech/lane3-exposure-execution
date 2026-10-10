@@ -91,6 +91,54 @@ jobs:
               sys.exit(1)
 
 
+          def oidc_validation_category(request_url, request_token, approved_origin, max_response):
+              # Mirror the pinned supplier's checks in order; return fixed labels only.
+              from urllib.parse import parse_qsl, urlsplit
+              if not isinstance(approved_origin, str) or not isinstance(request_url, str):
+                  return "oidc.validation.shape"
+              try:
+                  origin = urlsplit(approved_origin)
+                  request = urlsplit(request_url)
+                  if (
+                      origin.scheme != "https"
+                      or not origin.hostname
+                      or not origin.hostname.endswith(".actions.githubusercontent.com")
+                      or origin.netloc != origin.hostname
+                      or origin.path
+                      or origin.query
+                      or origin.fragment
+                      or origin.username is not None
+                      or request.scheme != origin.scheme
+                      or request.netloc != origin.netloc
+                  ):
+                      return "oidc.validation.origin"
+                  if (
+                      not request.path.startswith("/")
+                      or not request.path.endswith("/idtoken")
+                      or request.fragment
+                      or any(c.isspace() for c in request_url)
+                  ):
+                      return "oidc.validation.path"
+                  try:
+                      pairs = parse_qsl(
+                          request.query, keep_blank_values=True, strict_parsing=True
+                      )
+                  except ValueError:
+                      return "oidc.validation.query"
+                  if len(pairs) != 1 or pairs[0][0] != "api-version" or not pairs[0][1]:
+                      return "oidc.validation.query"
+                  if (
+                      not isinstance(request_token, str)
+                      or not request_token
+                      or len(request_token) > max_response
+                      or any(c.isspace() for c in request_token)
+                  ):
+                      return "oidc.validation.credential"
+                  return None
+              except Exception:
+                  return "oidc.validation.shape"
+
+
           def read_config(path):
               # Walk from / using pinned directory descriptors; never follow symlinks.
               directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -164,6 +212,15 @@ jobs:
           try:
               source_module = importlib.import_module("lane3_topology_source")
               topology_module = importlib.import_module("lane3_topology")
+              oidc_module = importlib.import_module("lane3_github_oidc")
+              validation = oidc_validation_category(
+                  os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""),
+                  os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", ""),
+                  config["oidc_broker_origin"],
+                  oidc_module.MAX_RESPONSE,
+              )
+              if validation is not None:
+                  refuse(validation)
               source = source_module.wireguard_github_openbao_source(
                   expected_version=EXPECTED_VERSION,
                   jwt_request_url=os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],
