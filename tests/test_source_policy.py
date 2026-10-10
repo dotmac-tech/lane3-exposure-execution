@@ -580,30 +580,40 @@ class BrokerDiscoveryBehavior(unittest.TestCase):
 
 
 class ReadFailureDisclosure(unittest.TestCase):
+    # Exception shape from lane3_topology_source at pinned 9cefdd7578bf.
+    # args contains the formatted sentence; reason owns the source category.
+    class SourceError(RuntimeError):
+        def __init__(self, reason):
+            super().__init__(f"Lane 3 topology record unavailable: {reason}")
+            self.reason = reason
+
     def project(self, error):
         tree = ast.parse(policy.PROOF_STEP_SCRIPT)
         handler = next(node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)
                        and any(isinstance(n, ast.Constant) and n.value == "unclassified" for n in ast.walk(node)))
         module = ast.Module(body=handler.body, type_ignores=[])
         out = []
+        source_module = type("SourceModule", (), {"TopologySourceUnavailable": self.SourceError})
         exec(compile(ast.fix_missing_locations(module), "failure-projection", "exec"),
-             {"exc": error, "refuse": out.append})
+             {"exc": error, "source_module": source_module, "refuse": out.append})
         return out
 
-    def test_known_categories_survive(self):
-        error_type = type("TopologySourceUnavailable", (RuntimeError,), {})
-        for label in ("transport.wireguard", "oidc.request", "transport.request"):
-            self.assertEqual(self.project(error_type(label)), ["read." + label])
+    def test_source_reason_survives_formatted_args(self):
+        for label in ("transport.wireguard", "oidc.request", "transport.request", "auth.response", "deadline", "kv.metadata"):
+            error = self.SourceError(label)
+            self.assertNotEqual(error.args[0], label)
+            self.assertEqual(self.project(error), ["read." + label])
 
-    def test_unknown_payloads_are_never_disclosed(self):
-        error_type = type("TopologySourceUnavailable", (RuntimeError,), {})
+    def test_unknown_reason_payloads_are_never_disclosed(self):
         for payload in ("private-value-example", "Bearer example", {"credential": "example"}, None):
-            self.assertEqual(self.project(error_type(payload)), ["read.unclassified"])
+            self.assertEqual(self.project(self.SourceError(payload)), ["read.unclassified"])
 
-    def test_foreign_exception_and_multiple_arguments_are_hidden(self):
-        error_type = type("TopologySourceUnavailable", (RuntimeError,), {})
+    def test_foreign_exception_and_impersonating_class_are_hidden(self):
         self.assertEqual(self.project(ValueError("oidc.request")), ["read.unclassified"])
-        self.assertEqual(self.project(error_type("oidc.request", "private-example")), ["read.unclassified"])
+        impostor = type("TopologySourceUnavailable", (RuntimeError,), {})
+        error = impostor("oidc.request")
+        error.reason = "oidc.request"
+        self.assertEqual(self.project(error), ["read.unclassified"])
 
 if __name__ == "__main__":
     unittest.main()
