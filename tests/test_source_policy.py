@@ -355,7 +355,7 @@ class RefusalOnlyTest(PlantCase):
         self.assertRefused("REFUSAL_ONLY")
 
     def test_proof_step_commit_changed(self) -> None:
-        self.replace(PRIV, 'COMMIT = "8625c4defd22f223d103fc94cbb74064804fe065"', f'COMMIT = "{GOOD_SHA}"')
+        self.replace(PRIV, 'COMMIT = "f867f20a2d17372172ca3a0d09a5eb4a72b62961"', f'COMMIT = "{GOOD_SHA}"')
         self.assertRefused("REFUSAL_ONLY")
 
     def test_proof_step_prints_the_record(self) -> None:

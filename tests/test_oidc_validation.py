@@ -116,7 +116,7 @@ class HandoffProofTest(unittest.TestCase):
                 if key == "ACTIONS_ID_TOKEN_REQUEST_TOKEN":
                     events.append(("token", None))
                 return super().__getitem__(key)
-        env = Metadata(STARTER_REVISION="8625c4defd22f223d103fc94cbb74064804fe065",
+        env = Metadata(STARTER_REVISION="f867f20a2d17372172ca3a0d09a5eb4a72b62961",
             GITHUB_REPOSITORY_ID="12", GITHUB_RUN_ID="34", GITHUB_RUN_ATTEMPT="1",
             GITHUB_WORKFLOW_SHA="d" * 40, ACTIONS_ID_TOKEN_REQUEST_URL=url or self.URL,
             ACTIONS_ID_TOKEN_REQUEST_TOKEN=self.TOKEN)

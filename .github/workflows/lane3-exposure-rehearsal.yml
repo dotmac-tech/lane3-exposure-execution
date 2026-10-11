@@ -68,7 +68,7 @@ jobs:
           import types
 
           # DRAFT supplier source pin only; this revision is not an admission decision.
-          COMMIT = "8625c4defd22f223d103fc94cbb74064804fe065"
+          COMMIT = "f867f20a2d17372172ca3a0d09a5eb4a72b62961"
           MODULES = {
               "lane3_topology.py": "418c87cf6fdbb56d8d391f9efaf1c0ca7618fff1fcc43261e9266c05268e97a6",
               "lane3_topology_source.py": "83f590635439e8b5f2faa1d33f3a9ad430350b5dd976aacacba5c8cb088756db",

@@ -67,7 +67,7 @@ correctly configured. Bootstrap and client repeats of digest checks are
 consistency checks, not independent admission authority.
 
 The source pin and nine-file module map match the proposed Starter revision
-`8625c4defd22f223d103fc94cbb74064804fe065`, including the root-check client
+`f867f20a2d17372172ca3a0d09a5eb4a72b62961`, including the root-check client
 and mandatory callback API. This is draft source matching, not admission.
 
 The source map in this draft pins proposed Starter supplier bytes, including
